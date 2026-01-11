@@ -2,8 +2,6 @@
 
 **TriviaMania** es una plataforma de juegos de trivia multijugador en tiempo real, diseñada con un enfoque en la experiencia de usuario (UX/UI) premium y moderna. Permite a los usuarios crear salas, unirse a partidas con amigos, elegir categorías y competir por el puntaje más alto.
 
-![TriviaMania Banner](https://via.placeholder.com/1200x400?text=TriviaMania+Premium+Experience)
-
 ## 🚀 Características Principales
 
 *   **Multijugador en Tiempo Real**: Sincronización instantánea mediante **Socket.io**.
