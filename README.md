@@ -128,7 +128,6 @@ TriviaMania/
 
 Este proyecto fue desarrollado como parte del curso de **Sistemas Distribuidos** en la **UNAMBA**.
 
-**Desarrollador Principal**: [Luis Rubio]
 
 ---
-© 2024 TriviaMania. Todos los derechos reservados.
+© 20246 TriviaMania. Todos los derechos reservados.
