@@ -4,6 +4,8 @@ const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
 const connectDB = require('./config/db');
+const User = require('./models/User'); // Global import
+const Room = require('./models/Room'); // Global import
 
 const app = express();
 const server = http.createServer(app);
@@ -19,75 +21,84 @@ app.use(express.json());
 app.use('/api/auth', require('./routes/authRoutes'));
 app.use('/api/questions', require('./routes/questionRoutes'));
 
-const rooms = {};
+const activeTimers = {}; // Simple in-memory timer map
 
 io.on('connection', (socket) => {
     console.log('👤 Usuario conectado:', socket.id);
 
     // Create Room
-    socket.on('create-room', ({ roomCode, username, avatar, category }) => {
-        if (!rooms[roomCode]) {
-            rooms[roomCode] = {
-                host: socket.id,
-                category: category || 'General',
-                players: [],
-                gameState: 'waiting',
-                scores: {},
-                questions: [],
-                currentQuestionIndex: 0
-            };
+    socket.on('create-room', async ({ roomCode, username, avatar, category }) => {
+        try {
+            // Check if exists
+            let room = await Room.findOne({ roomCode });
+            if (!room) {
+                room = await Room.create({
+                    roomCode,
+                    category: category || 'General',
+                    gameState: 'waiting',
+                    players: [{ username, avatar, score: 0, socketId: socket.id }],
+                    currentQuestionIndex: 0
+                });
+                console.log(`[DB] Room ${roomCode} created by ${username}`);
+            } else {
+                console.log(`[DB] Room ${roomCode} already exists, re-joining host`);
+            }
 
-            // Auto join host
             socket.join(roomCode);
-            rooms[roomCode].players.push({ id: socket.id, username, avatar, score: 0 });
-            rooms[roomCode].scores[username] = 0;
-
             socket.emit('room-created', { roomCode });
-            io.to(roomCode).emit('update-players', rooms[roomCode].players);
-            console.log(`Room ${roomCode} created by ${username}`);
+            io.to(roomCode).emit('update-players', room.players);
+        } catch (err) {
+            console.error('Error creating room:', err);
         }
     });
 
     // Join Room
-    socket.on('join-room', ({ roomCode, username, avatar }) => {
-        const room = rooms[roomCode];
+    socket.on('join-room', async ({ roomCode, username, avatar }) => {
+        try {
+            const room = await Room.findOne({ roomCode });
 
-        if (!room) {
-            socket.emit('error', { msg: 'Sala no encontrada' });
-            return;
+            if (!room) {
+                socket.emit('error', { msg: 'Sala no encontrada' });
+                return;
+            }
+
+            if (room.gameState === 'playing') {
+                socket.emit('error', { msg: 'La partida ya comenzó' });
+                return;
+            }
+
+            socket.join(roomCode);
+
+            // Check if player exists
+            const existingPlayerIndex = room.players.findIndex(p => p.username === username);
+            if (existingPlayerIndex === -1) {
+                room.players.push({ username, avatar, score: 0, socketId: socket.id });
+            } else {
+                // Update socket ID and avatar
+                room.players[existingPlayerIndex].socketId = socket.id;
+                if (avatar) room.players[existingPlayerIndex].avatar = avatar;
+            }
+
+            await room.save();
+
+            socket.emit('joined-room', { roomCode });
+            io.to(roomCode).emit('update-players', room.players);
+            console.log(`[DB] User ${username} joined room ${roomCode}`);
+        } catch (err) {
+            console.error('Error joining room:', err);
         }
-
-        if (room.gameState === 'playing') {
-            socket.emit('error', { msg: 'La partida ya comenzó' });
-            return;
-        }
-
-        socket.join(roomCode);
-
-        const existingPlayer = room.players.find(p => p.username === username);
-        if (!existingPlayer) {
-            room.players.push({ id: socket.id, username, avatar, score: 0 });
-            room.scores[username] = 0;
-        } else {
-            existingPlayer.id = socket.id;
-            // Update avatar if changed (optional but good)
-            if (avatar) existingPlayer.avatar = avatar;
-        }
-
-        socket.emit('joined-room', { roomCode });
-        io.to(roomCode).emit('update-players', room.players);
-        console.log(`User ${username} joined room ${roomCode}`);
     });
 
     // Start Game
     socket.on('start-game', async ({ roomCode }) => {
-        if (rooms[roomCode]) {
-            rooms[roomCode].gameState = 'playing';
+        try {
+            const room = await Room.findOne({ roomCode });
+            if (room) {
+                room.gameState = 'playing';
 
-            try {
                 // Filter by category
-                const matchStage = (rooms[roomCode].category !== 'General' && rooms[roomCode].category !== 'Todas')
-                    ? { $match: { category: rooms[roomCode].category } }
+                const matchStage = (room.category !== 'General' && room.category !== 'Todas')
+                    ? { $match: { category: room.category } }
                     : { $match: {} };
 
                 const questions = await require('./models/Question').aggregate([
@@ -95,136 +106,151 @@ io.on('connection', (socket) => {
                     { $sample: { size: 5 } }
                 ]);
 
-                rooms[roomCode].questions = questions;
-                rooms[roomCode].currentQuestionIndex = 0;
+                room.questions = questions;
+                room.currentQuestionIndex = 0;
+                await room.save();
 
                 io.to(roomCode).emit('game-started');
 
                 setTimeout(() => {
                     sendQuestion(roomCode);
                 }, 1000);
-
-            } catch (err) {
-                console.error(err);
             }
+        } catch (err) {
+            console.error(err);
         }
     });
 
     // Submit Answer (with Time Bonus & Multiplier)
-    socket.on('submit-answer', ({ roomCode, username, answerIndex, timeLeft, multiplier }) => {
-        const room = rooms[roomCode];
-        if (!room || room.gameState !== 'playing') return;
+    socket.on('submit-answer', async ({ roomCode, username, answerIndex, timeLeft }) => {
+        try {
+            console.log(`[GAME] 📩 Answer received from ${username} for room ${roomCode}`);
+            const room = await Room.findOne({ roomCode });
 
-        const currentQ = room.questions[room.currentQuestionIndex];
-        const isCorrect = currentQ.correctAnswerIndex === answerIndex;
-
-        if (isCorrect) {
-            // New Formula: Max 100 points, proportional to time left.
-            // Max time is 15s.
-            const totalTime = 15;
-            const percentage = (timeLeft || 0) / totalTime;
-            const points = Math.ceil(100 * percentage); // e.g. 15s -> 100, 7.5s -> 50, 1s -> 7
-
-            const player = room.players.find(p => p.username === username);
-            if (player) {
-                player.score += points;
-                room.scores[username] += points;
-
-                // PERSIST TO DATABASE
-                // We need to find the user by username. Ideally we have userId in room players.
-                // For now, update by username.
-                const User = require('./models/User');
-                User.findOneAndUpdate(
-                    { username: username },
-                    {
-                        $inc: { points: points }, // Increment points immediately
-                    }
-                ).catch(err => console.error('Error saving score:', err));
+            if (!room) {
+                console.error(`[GAME] ❌ Room ${roomCode} not found!`);
+                return;
             }
-        }
-
-        // Initialize answered count if not exists
-        if (!room.answeredCount) room.answeredCount = 0;
-
-        // Prevent double submission logic (though frontend disables it)
-        // ideally we track WHO answered to be safe, but simple count works for now if clients are good
-        room.answeredCount++;
-
-        io.to(roomCode).emit('update-leaderboard', room.players);
-
-        // Check if all players answered
-        if (room.answeredCount >= room.players.length) {
-            // Everyone answered! Advance quickly.
-            if (room.timer) clearTimeout(room.timer);
 
             const currentQ = room.questions[room.currentQuestionIndex];
-            io.to(roomCode).emit('question-results', {
-                correctAnswerIndex: currentQ.correctAnswerIndex
-            });
+            const isCorrect = currentQ.correctAnswerIndex === answerIndex;
 
-            // Small delay to show results/feedback
-            setTimeout(() => {
-                room.currentQuestionIndex++;
-                sendQuestion(roomCode);
-            }, 3000); // 3 seconds to see "Enviado" or feedback
+            // Find player in the room doc
+            const playerIndex = room.players.findIndex(p => p.username === username);
+
+            if (playerIndex !== -1) {
+                if (isCorrect) {
+                    const totalTime = 15;
+                    const percentage = (timeLeft || 0) / totalTime;
+                    const points = Math.ceil(100 * percentage);
+
+                    console.log(`[GAME] ✅ User ${username} answered CORRECTLY. Points: ${points}`);
+
+                    // Update Room Player Score (in JS array directly)
+                    room.players[playerIndex].score += points;
+
+                    // Update User Global Score (Independent query)
+                    await User.findOneAndUpdate(
+                        { username: { $regex: new RegExp("^" + username + "$", "i") } },
+                        { $inc: { points: points }, $set: { lastActive: new Date() } }
+                    ).catch(e => console.error("Global score update invalid", e));
+                } else {
+                    console.log(`[GAME] ❌ User ${username} answered INCORRECTLY.`);
+                }
+            } else {
+                console.error(`[GAME] ❌ Player ${username} not found in room roster.`);
+            }
+
+            // Increment answered count
+            // We use JS increment then save whole document. Safer than mix of $inc and save.
+            room.answeredCount = (room.answeredCount || 0) + 1;
+
+            // Mark modified just in case
+            room.markModified('players');
+            await room.save();
+
+            // Send updated leaderboard immediately
+            io.to(roomCode).emit('update-leaderboard', room.players);
+
+            // Check if all players answered
+            if (room.answeredCount >= room.players.length) {
+                if (activeTimers[roomCode]) clearTimeout(activeTimers[roomCode]);
+
+                const currentQ = room.questions[room.currentQuestionIndex];
+                io.to(roomCode).emit('question-results', {
+                    correctAnswerIndex: currentQ.correctAnswerIndex
+                });
+
+                activeTimers[roomCode] = setTimeout(() => {
+                    incrementQuestionIndex(roomCode);
+                }, 3000);
+            }
+
+        } catch (err) {
+            console.error("Error in submit-answer:", err);
         }
     });
 
-    const sendQuestion = (roomCode) => {
-        const room = rooms[roomCode];
+    const sendQuestion = async (roomCode) => {
+        try {
+            const room = await Room.findOne({ roomCode });
+            if (!room) return;
 
-        // Clear previous timer
-        if (room.timer) clearTimeout(room.timer);
+            if (activeTimers[roomCode]) clearTimeout(activeTimers[roomCode]);
 
-        if (room.currentQuestionIndex < room.questions.length) {
-            // Reset answered count
-            room.answeredCount = 0;
+            if (room.currentQuestionIndex < room.questions.length) {
+                // Reset answered count
+                room.answeredCount = 0;
+                await room.save();
 
-            const q = room.questions[room.currentQuestionIndex];
-            io.to(roomCode).emit('receive-question', {
-                questionText: q.questionText,
-                options: q.options,
-                category: q.category,
-                total: room.questions.length,
-                current: room.currentQuestionIndex + 1
-            });
+                const q = room.questions[room.currentQuestionIndex];
+                io.to(roomCode).emit('receive-question', {
+                    questionText: q.questionText,
+                    options: q.options,
+                    category: q.category,
+                    total: room.questions.length,
+                    current: room.currentQuestionIndex + 1
+                });
 
-            // Auto-advance after 20 seconds (15s thinking + 5s buffer)
-            room.timer = setTimeout(() => {
-                room.currentQuestionIndex++;
-                sendQuestion(roomCode);
-            }, 20000);
+                // Auto-advance after 18 seconds (15s game time + 3s buffer)
+                activeTimers[roomCode] = setTimeout(() => {
+                    incrementQuestionIndex(roomCode);
+                }, 18000);
 
-        } else {
-            io.to(roomCode).emit('game-ended', room.players);
-            room.gameState = 'finished';
+            } else {
+                room.gameState = 'finished';
+                await room.save();
+                io.to(roomCode).emit('game-ended', room.players);
 
-            // Update gamesPlayed for all players
-            const User = require('./models/User');
-            room.players.forEach(p => {
-                User.findOneAndUpdate(
-                    { username: p.username },
-                    { $inc: { gamesPlayed: 1 } }
-                ).catch(e => console.error(e));
-            });
+                // Update gamesPlayed for all players
+                room.players.forEach(p => {
+                    User.findOneAndUpdate(
+                        { username: p.username },
+                        { $inc: { gamesPlayed: 1 } }
+                    ).catch(e => console.error(e));
+                });
+            }
+        } catch (err) {
+            console.error("Error in sendQuestion:", err);
+        }
+    };
+
+    const incrementQuestionIndex = async (roomCode) => {
+        const room = await Room.findOne({ roomCode });
+        if (room) {
+            room.currentQuestionIndex++;
+            await room.save();
+            sendQuestion(roomCode);
         }
     };
 
     socket.on('next-question', ({ roomCode }) => {
-        const room = rooms[roomCode];
-        if (room) {
-            if (room.timer) clearTimeout(room.timer); // Clear auto-timer if manual next
-            room.currentQuestionIndex++;
-            sendQuestion(roomCode);
-        }
+        if (activeTimers[roomCode]) clearTimeout(activeTimers[roomCode]);
+        incrementQuestionIndex(roomCode);
     });
 
-    socket.on('disconnect', () => {
+    socket.on('disconnect', async () => {
         console.log('Client disconnected', socket.id);
-        for (const roomCode in rooms) {
-            rooms[roomCode].players = rooms[roomCode].players.filter(p => p.id !== socket.id);
-            io.to(roomCode).emit('update-players', rooms[roomCode].players);
-        }
     });
 });
 

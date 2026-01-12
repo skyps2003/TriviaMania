@@ -46,11 +46,15 @@ const Lobby = () => {
         socket.on('room-created', ({ roomCode }) => {
             setRoomCode(roomCode);
             setIsInRoom(true);
+            localStorage.setItem('currentRoomCode', roomCode);
+            console.log("Sala Creada y Guardada:", roomCode);
         });
 
         socket.on('joined-room', ({ roomCode }) => {
             setRoomCode(roomCode);
             setIsInRoom(true);
+            localStorage.setItem('currentRoomCode', roomCode);
+            console.log("Unido a Sala y Guardada:", roomCode);
         });
 
         return () => {

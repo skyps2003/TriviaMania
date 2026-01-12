@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import socket from '../services/socket';
 import {
     Clock, Zap, Bomb, Trophy, User, ArrowRight, CheckCircle,
-    Beaker, Scroll, Palette, Globe, Clapperboard, Home
+    Beaker, Scroll, Palette, Globe, Clapperboard, Home, Medal
 } from 'lucide-react';
 
 const Game = () => {
@@ -17,10 +17,8 @@ const Game = () => {
     const [confirmed, setConfirmed] = useState(false);
     const [correctAnswer, setCorrectAnswer] = useState(null);
 
-    // Power-ups state
-    const [powerups, setPowerups] = useState({ fifty: true, double: true });
+    // Power-ups state (Visual only as per request)
     const [disabledOptions, setDisabledOptions] = useState([]);
-    const [isDoublePoints, setIsDoublePoints] = useState(false);
 
     const navigate = useNavigate();
     const user = JSON.parse(localStorage.getItem('user'));
@@ -48,26 +46,37 @@ const Game = () => {
             return;
         }
 
+        const roomCode = localStorage.getItem('currentRoomCode');
+        if (!roomCode) {
+            console.warn("No room code found, redirecting to lobby");
+            navigate('/lobby');
+            return;
+        }
+
         socket.on('receive-question', (data) => {
+            console.log("Nueva pregunta recibida:", data);
             setQuestion(data);
             setTimeLeft(15);
             setSelectedAnswer(null);
             setConfirmed(false);
-            setCorrectAnswer(null); // Reset explanation/colors
+            setCorrectAnswer(null);
             setDisabledOptions([]);
-            setIsDoublePoints(false);
         });
 
         socket.on('update-leaderboard', (updatedPlayers) => {
+            console.log("Leaderboard actualizado:", updatedPlayers);
             setPlayers(updatedPlayers.sort((a, b) => b.score - a.score));
         });
 
-        socket.on('question-ended', (finalPlayers) => {
+        // CRITICAL FIX: Listening for the correct event 'game-ended'
+        socket.on('game-ended', (finalPlayers) => {
+            console.log("Juego terminado. Resultados:", finalPlayers);
             setGameFinished(true);
             setPlayers(finalPlayers.sort((a, b) => b.score - a.score));
         });
 
         socket.on('question-results', ({ correctAnswerIndex }) => {
+            console.log("Resultados de pregunta. Correcta:", correctAnswerIndex);
             setCorrectAnswer(correctAnswerIndex);
         });
 
@@ -77,17 +86,17 @@ const Game = () => {
             socket.off('game-ended');
             socket.off('question-results');
         };
-    }, []);
+    }, [navigate, user]);
 
     useEffect(() => {
-        if (timeLeft > 0 && question && !gameFinished) {
+        if (timeLeft > 0 && question && !gameFinished && correctAnswer === null) {
             const timer = setTimeout(() => setTimeLeft(timeLeft - 1), 1000);
             return () => clearTimeout(timer);
         }
-    }, [timeLeft, question, gameFinished]);
+    }, [timeLeft, question, gameFinished, correctAnswer]);
 
     const handleSelect = (index) => {
-        if (!confirmed) {
+        if (!confirmed && correctAnswer === null) {
             setSelectedAnswer(index);
         }
     };
@@ -95,54 +104,91 @@ const Game = () => {
     const handleConfirm = () => {
         if (selectedAnswer !== null) {
             setConfirmed(true);
+            const currentRoomCode = localStorage.getItem('currentRoomCode');
+
+            if (!currentRoomCode) {
+                alert("Error: No estás en una sala válida.");
+                return;
+            }
+
+            console.log(`Enviando respuesta... Sala: ${currentRoomCode}, Respuesta: ${selectedAnswer}`);
+
             socket.emit('submit-answer', {
-                roomCode: 'sala-1',
+                roomCode: currentRoomCode,
                 username: user.username,
                 answerIndex: selectedAnswer,
                 timeLeft: timeLeft
             });
         }
     };
-    const activateFifty = () => {
-        if (!powerups.fifty || !question || confirmed) return;
-        setPowerups({ ...powerups, fifty: false });
-        alert('¡Bomba 50/50 Activada! (Efecto Visual)');
-    };
-
-    const activateDouble = () => {
-        if (!powerups.double || confirmed) return;
-        setIsDoublePoints(true);
-        setPowerups({ ...powerups, double: false });
-    };
 
     if (gameFinished) {
+        const isWinner = players.length > 0 && players[0].username === user.username;
         return (
             <div className="flex flex-col items-center justify-center min-h-screen bg-slate-950 p-4 font-sans relative overflow-hidden">
-                <div className="w-full max-w-2xl bg-slate-900 rounded-3xl border border-slate-800 p-8 text-center relative z-10 shadow-2xl animate-fade-in">
-                    <div className="inline-flex p-4 bg-brand-primary/10 rounded-full text-brand-primary mb-6">
-                        <Trophy size={48} />
-                    </div>
-                    <h1 className="text-4xl font-bold text-white mb-2">PARTIDA FINALIZADA</h1>
-                    <p className="text-slate-200 font-medium mb-10">Ranking final de jugadores</p>
+                {/* Background Effects */}
+                {isWinner && (
+                    <>
+                        <div className="absolute inset-0 bg-yellow-500/5 animate-pulse pointer-events-none"></div>
+                        <div className="absolute top-0 left-0 w-full h-full overflow-hidden pointer-events-none">
+                            {/* Simple CSS Confetti could go here */}
+                            <div className="absolute top-1/4 left-1/4 w-4 h-4 bg-yellow-400 rounded-full animate-bounce"></div>
+                            <div className="absolute top-1/3 right-1/4 w-3 h-3 bg-red-400 rounded-full animate-ping"></div>
+                        </div>
+                    </>
+                )}
 
-                    <div className="space-y-3 mb-10">
+                <div className={`w-full max-w-2xl bg-slate-900 rounded-3xl border ${isWinner ? 'border-yellow-500 shadow-glow-yellow' : 'border-slate-800'} p-8 text-center relative z-10 shadow-2xl animate-fade-in`}>
+
+                    <div className={`inline-flex p-6 rounded-full mb-8 ${isWinner ? 'bg-gradient-to-br from-yellow-400 to-orange-500 text-white shadow-lg scale-110' : 'bg-slate-800 text-slate-500'}`}>
+                        {isWinner ? <Trophy size={64} className="animate-bounce" /> : <Medal size={64} />}
+                    </div>
+
+                    {isWinner ? (
+                        <>
+                            <h1 className="text-5xl md:text-6xl font-black text-transparent bg-clip-text bg-gradient-to-r from-yellow-300 via-orange-400 to-yellow-300 mb-4 animate-pulse">¡HAS GANADO!</h1>
+                            <p className="text-yellow-100/80 font-bold mb-12 text-xl tracking-wide">¡Eres el maestro indiscutible de la trivia!</p>
+                        </>
+                    ) : (
+                        <>
+                            <h1 className="text-4xl font-bold text-white mb-4">PARTIDA FINALIZADA</h1>
+                            <p className="text-slate-400 font-medium mb-12">¡Buen intento! Sigue practicando.</p>
+                        </>
+                    )}
+
+                    <div className="space-y-4 mb-12">
                         {players.map((p, i) => (
-                            <div key={i} className={`flex justify-between items-center p-4 rounded-xl border transition-all ${i === 0 ? 'bg-brand-primary/10 border-brand-primary/50' : 'bg-slate-800 border-slate-700'}`}>
-                                <div className="flex items-center gap-4">
-                                    <div className={`flex items-center justify-center w-8 h-8 rounded-full font-bold text-sm ${i === 0 ? 'bg-brand-primary text-white' : 'bg-slate-700 text-slate-300'}`}>
+                            <div key={i} className={`flex justify-between items-center p-5 rounded-2xl border transition-all 
+                                ${i === 0
+                                    ? 'bg-gradient-to-r from-yellow-500/10 to-orange-500/10 border-yellow-500/40 shadow-[0_0_15px_rgba(234,179,8,0.1)]'
+                                    : 'bg-slate-800/50 border-slate-700/50'
+                                }`}>
+                                <div className="flex items-center gap-5">
+                                    <div className={`flex items-center justify-center w-10 h-10 rounded-xl font-black text-lg shadow-sm
+                                        ${i === 0 ? 'bg-gradient-to-br from-yellow-400 to-orange-500 text-white' : 'bg-slate-700 text-slate-300'}`}>
                                         {i + 1}
                                     </div>
-                                    <div className="w-10 h-10 rounded-full overflow-hidden bg-slate-800 border border-slate-600">
+                                    <div className={`w-12 h-12 rounded-full overflow-hidden bg-slate-800 border-2 ${i === 0 ? 'border-yellow-400' : 'border-slate-600'}`}>
                                         <img src={getAvatarUrl(p.avatar)} alt="av" className="w-full h-full object-cover" />
                                     </div>
-                                    <span className={`font-bold ${i === 0 ? 'text-white' : 'text-slate-200'}`}>{p.username}</span>
+                                    <div className="flex flex-col items-start">
+                                        <span className={`font-bold text-lg ${i === 0 ? 'text-yellow-100' : 'text-slate-200'}`}>
+                                            {p.username} {p.username === user.username && '(Tú)'}
+                                        </span>
+                                        {i === 0 && <span className="text-[10px] font-black uppercase tracking-wider text-yellow-500">Ganador</span>}
+                                    </div>
                                 </div>
-                                <span className="font-mono font-bold text-lg text-brand-primary">{p.score}</span>
+                                <div className="flex flex-col items-end">
+                                    <span className={`font-mono font-black text-2xl ${i === 0 ? 'text-yellow-400' : 'text-white'}`}>
+                                        {p.score}
+                                    </span>
+                                    <span className="text-[10px] font-bold text-slate-500 uppercase">Puntos</span>
+                                </div>
                             </div>
                         ))}
                     </div>
-                    <button onClick={() => navigate('/lobby')} className="w-full py-4 bg-slate-800 text-white rounded-xl font-bold hover:bg-slate-700 transition-all flex items-center justify-center gap-2">
-                        <Home size={20} />
+                    <button onClick={() => navigate('/lobby')} className="w-full py-5 bg-slate-800 text-white rounded-xl font-bold hover:bg-slate-700 hover:text-white hover:shadow-lg hover:-translate-y-1 transition-all flex items-center justify-center gap-3 group border border-slate-700">
+                        <Home size={22} className="group-hover:-translate-x-1 transition-transform text-slate-400 group-hover:text-white" />
                         VOLVER AL LOBBY
                     </button>
                 </div>
@@ -152,11 +198,12 @@ const Game = () => {
 
     if (!question) return (
         <div className="flex flex-col items-center justify-center h-screen bg-slate-950 font-sans">
-            <div className="relative w-20 h-20 mb-6">
+            <div className="relative w-24 h-24 mb-8">
                 <div className="absolute inset-0 border-4 border-slate-800 rounded-full"></div>
                 <div className="absolute inset-0 border-4 border-t-brand-primary border-r-transparent border-b-transparent border-l-transparent rounded-full animate-spin"></div>
             </div>
-            <h1 className="text-lg font-bold text-slate-200 uppercase tracking-widest animate-pulse">Sincronizando...</h1>
+            <h1 className="text-xl font-bold text-slate-200 uppercase tracking-[0.2em] animate-pulse mb-2">Sincronizando</h1>
+            <p className="text-slate-500 text-sm font-mono">Conectando con el servidor...</p>
         </div>
     );
 
@@ -168,11 +215,16 @@ const Game = () => {
 
             {/* Header */}
             <div className="w-full max-w-5xl flex justify-between items-center mb-8">
-                <div className="flex items-center gap-3 bg-slate-900 border border-slate-800 p-2 pr-5 rounded-full">
-                    <div className="w-10 h-10 rounded-full overflow-hidden bg-slate-800 border border-slate-700">
-                        <img src={getAvatarUrl(user.avatar)} alt="me" className="w-full h-full object-cover" />
+                <div className="flex flex-col">
+                    <div className="flex items-center gap-3 bg-slate-900 border border-slate-800 p-2 pr-5 rounded-full mb-2">
+                        <div className="w-10 h-10 rounded-full overflow-hidden bg-slate-800 border border-slate-700">
+                            <img src={getAvatarUrl(user.avatar)} alt="me" className="w-full h-full object-cover" />
+                        </div>
+                        <span className="font-bold text-slate-200 text-sm">{user.username}</span>
                     </div>
-                    <span className="font-bold text-slate-200 text-sm">{user.username}</span>
+                    <span className="text-xs text-slate-500 font-mono ml-2 uppercase tracking-wide">
+                        Pregunta <span className="text-white font-bold text-sm">{question.current}</span> de {question.total}
+                    </span>
                 </div>
 
                 {/* Timer Widget */}
@@ -209,76 +261,80 @@ const Game = () => {
                         {question.category}
                     </span>
                 </div>
-                <p className="text-3xl md:text-4xl font-bold leading-tight text-white mt-4 drop-shadow-md">{question.questionText}</p>
+                <p className="text-2xl md:text-4xl font-bold leading-snug text-white mt-4 drop-shadow-md">
+                    {question.questionText}
+                </p>
             </div>
 
-
-
             {/* Options */}
-            <div className="w-full max-w-4xl grid grid-cols-1 md:grid-cols-2 gap-4 mb-10">
-                {question.options.map((opt, i) => (
-                    <button
-                        key={i}
-                        onClick={() => handleSelect(i)}
-                        disabled={confirmed || disabledOptions.includes(i)}
-                        className={`relative p-6 rounded-2xl text-xl font-bold transition-all border-2 flex items-center justify-between group min-h-[5.5rem]
-                            ${
-                            // Logic for styling:
-                            // 1. If results revealed (correctAnswer !== null):
-                            //    - If this is correct -> GREEN
-                            //    - If this I picked but wrong -> RED
-                            //    - Else -> Opacity lowered
-                            // 2. If not revealed but selected -> YELLOW
-                            // 3. Default -> Slate
-                            correctAnswer !== null
-                                ? i === correctAnswer
-                                    ? 'bg-green-500 text-white border-green-600 shadow-glow-green scale-[1.02] z-10'
-                                    : i === selectedAnswer
-                                        ? 'bg-red-500 text-white border-red-600 shadow-glow-red scale-[1.02] z-10'
-                                        : 'bg-slate-800 text-slate-500 border-slate-700 opacity-50'
-                                : selectedAnswer === i
-                                    ? 'bg-yellow-400 text-slate-900 border-yellow-500 shadow-glow-yellow scale-[1.02] z-10'
-                                    : 'bg-slate-800 text-slate-300 border-slate-700 hover:border-slate-500 hover:bg-slate-750 hover:text-white'
-                            }
-                            ${disabledOptions.includes(i) ? 'opacity-20 cursor-not-allowed hidden' : ''}
-                        `}
-                    >
-                        <span className="text-left leading-tight z-10">{opt}</span>
-                        {/* Icons */}
-                        {correctAnswer !== null ? (
-                            i === correctAnswer ? (
-                                <div className="w-8 h-8 bg-white/20 rounded-full flex items-center justify-center text-white shadow-sm animate-scale-in">
+            <div className="w-full max-w-4xl grid grid-cols-1 md:grid-cols-2 gap-4 mb-10 h-full">
+                {question.options.map((opt, i) => {
+                    // Visual Logic
+                    let btnClass = "bg-slate-800 text-slate-300 border-slate-700 hover:border-slate-500 hover:bg-slate-750 hover:text-white";
+                    let showCheck = false;
+                    let showX = false;
+
+                    if (correctAnswer !== null) {
+                        // Results Phase
+                        if (i === correctAnswer) {
+                            btnClass = "bg-green-500 text-white border-green-600 shadow-glow-green scale-[1.02] z-10";
+                            showCheck = true;
+                        } else if (i === selectedAnswer) {
+                            btnClass = "bg-red-500 text-white border-red-600 shadow-glow-red scale-[1.02] z-10 opacity-100";
+                            showX = true;
+                        } else {
+                            btnClass = "bg-slate-800 text-slate-600 border-slate-800 opacity-40";
+                        }
+                    } else if (selectedAnswer === i) {
+                        // Selection Phase
+                        btnClass = "bg-yellow-400 text-slate-900 border-yellow-500 shadow-glow-yellow scale-[1.02] z-10";
+                    }
+
+                    return (
+                        <button
+                            key={i}
+                            onClick={() => handleSelect(i)}
+                            disabled={confirmed || disabledOptions.includes(i) || correctAnswer !== null}
+                            className={`relative p-6 rounded-2xl text-lg md:text-xl font-bold transition-all border-2 flex items-center justify-between group min-h-[5rem] ${btnClass}`}
+                        >
+                            <span className="text-left leading-tight z-10 flex-1">{opt}</span>
+
+                            {/* Status Icons */}
+                            {showCheck && (
+                                <div className="ml-3 w-8 h-8 bg-white/20 rounded-full flex items-center justify-center text-white shadow-sm animate-scale-in flex-shrink-0">
                                     <CheckCircle size={20} className="fill-current" />
                                 </div>
-                            ) : i === selectedAnswer ? (
-                                <div className="w-8 h-8 bg-white/20 rounded-full flex items-center justify-center text-white shadow-sm animate-scale-in">
-                                    <ArrowRight size={20} className="rotate-45" />
+                            )}
+                            {showX && (
+                                <div className="ml-3 w-8 h-8 bg-white/20 rounded-full flex items-center justify-center text-white shadow-sm animate-scale-in flex-shrink-0">
+                                    <Clock size={20} className="stroke-2 rotate-45" />
                                 </div>
-                            ) : null
-                        ) : selectedAnswer === i ? (
-                            <div className="w-8 h-8 bg-black/10 rounded-full flex items-center justify-center text-slate-900 shadow-sm animate-scale-in">
-                                <CheckCircle size={20} className="fill-current" />
-                            </div>
-                        ) : null}
-                    </button>
-                ))}
+                            )}
+                            {!showCheck && !showX && selectedAnswer === i && correctAnswer === null && (
+                                <div className="ml-3 w-8 h-8 bg-black/10 rounded-full flex items-center justify-center text-slate-900 shadow-sm animate-scale-in flex-shrink-0">
+                                    <CheckCircle size={20} className="fill-current" />
+                                </div>
+                            )}
+                        </button>
+                    );
+                })}
             </div>
 
             {/* CONFIRM BUTTON */}
-            <div className="w-full max-w-md fixed bottom-8 md:relative md:bottom-auto z-50 px-4 md:px-0">
+            <div className="w-full max-w-md fixed bottom-6 md:relative md:bottom-auto z-50 px-4 md:px-0">
                 <button
                     onClick={handleConfirm}
-                    disabled={selectedAnswer === null || confirmed}
+                    disabled={selectedAnswer === null || confirmed || correctAnswer !== null}
                     className={`w-full py-4 rounded-2xl font-black text-xl uppercase tracking-widest shadow-xl transition-all flex items-center justify-center gap-3 border-b-4
-                        ${selectedAnswer !== null && !confirmed
+                        ${selectedAnswer !== null && !confirmed && correctAnswer === null
                             ? 'bg-brand-success text-white border-green-600 hover:bg-green-400 hover:border-green-500 hover:-translate-y-1 active:translate-y-0 active:border-t-4 active:border-b-0'
                             : 'bg-slate-800 text-slate-500 border-slate-900 cursor-not-allowed'}
                     `}
                 >
                     {confirmed ? (
                         <>
-                            <span className="animate-pulse">Enviado</span>
-                            <CheckCircle size={24} />
+                            <span className="animate-pulse">Esperando...</span>
+                            <Clock size={24} className="animate-spin-slow" />
                         </>
                     ) : (
                         <>
@@ -287,7 +343,7 @@ const Game = () => {
                         </>
                     )}
                 </button>
-                {confirmed && <p className="text-center text-slate-400 mt-3 text-sm font-medium animate-pulse">Esperando a los demás jugadores...</p>}
+                {confirmed && !correctAnswer && <p className="text-center text-slate-400 mt-3 text-xs font-bold uppercase tracking-widest animate-pulse">Tu respuesta ha sido enviada</p>}
             </div>
         </div>
     );
